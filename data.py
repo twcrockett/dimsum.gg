@@ -22,8 +22,10 @@ conn = psycopg2.connect(connection_string)
 watcher = LolWatcher(api_key)
 
 # let's use DimSumKing
-puuid = os.getenv('DimSumKing')
+puuid = os.getenv('DimSumKing_puuid')
+id = os.getenv('DimSumKing_id')
 region = "AMERICAS"
+subregion = "NA1"
 matches = watcher.match.matchlist_by_puuid(region=region, puuid=puuid, type='ranked')
 print(matches)
 
@@ -31,16 +33,16 @@ def create_tables(conn):
     cursor = conn.cursor()
 
     matches_table = '''
-    CREATE TABLE IF NOT EXISTS matches (
-        match_id VARCHAR(255) PRIMARY KEY,
-        game_duration INT,
-        game_version VARCHAR(255),
-        game_mode VARCHAR(255),
-        game_type VARCHAR(255),
-        map_id INT,
-        queue_id INT
-    );
-    '''
+        CREATE TABLE IF NOT EXISTS matches (
+            match_id VARCHAR(255) PRIMARY KEY,
+            game_duration INT,
+            game_version VARCHAR(255),
+            game_mode VARCHAR(255),
+            game_type VARCHAR(255),
+            map_id INT,
+            queue_id INT
+        );
+        '''
 
     timelines_table = '''
         CREATE TABLE IF NOT EXISTS timelines (
@@ -56,13 +58,27 @@ def create_tables(conn):
             minions_killed INT,
             jungle_minions_killed INT,
             event_type VARCHAR(255),
+            bounty INT,
+            kill_streak_length INT,
+            killer_id INT,
+            shutdown_bounty INT,
             PRIMARY KEY (match_id, participant_id, timestamp),
-            FOREIGN KEY (match_id) REFERENCES matches(match_id)
+            FOREIGN KEY (match_id) REFERENCES matches(match_id),
+            UNIQUE (match_id, participant_id, timestamp)
+        );
+        '''
+
+    empty_table = '''
+        CREATE TABLE IF NOT EXISTS empty (
+            empty VARCHAR(255),
+            PRIMARY KEY (empty),
+            UNIQUE (empty)
         );
         '''
 
     cursor.execute(matches_table)
     cursor.execute(timelines_table)
+    cursor.execute(empty_table)
     conn.commit()
     cursor.close()
 
@@ -87,10 +103,10 @@ def get_match(region, match_id):
 def insert_match_data(conn, data):
     cursor = conn.cursor()
     sql = '''
-    INSERT INTO matches (match_id, game_duration, game_version, game_mode, game_type, map_id, queue_id)
-    VALUES (%s, %s, %s, %s, %s, %s, %s)
-    ON CONFLICT (match_id) DO NOTHING;
-    '''
+        INSERT INTO matches (match_id, game_duration, game_version, game_mode, game_type, map_id, queue_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (match_id) DO NOTHING;
+        '''
 
     values = (
         match_data['metadata']['matchId'],
@@ -106,52 +122,60 @@ def insert_match_data(conn, data):
     conn.commit()
     cursor.close()
 
-# def insert_timeline_data(conn, match_id, match_timeline):
-#     cursor = conn.cursor()
-#     sql = '''
-#     INSERT INTO timelines (match_id, participant_id, timestamp, position_x, position_y, level, total_gold, current_gold, xp, minions_killed, jungle_minions_killed, event_type)
-#     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
-#     '''
-#
-#     for frame in match_timeline['info']['frames']:
-#         timestamp = frame['timestamp']
-#
-#         for pid, pdata in frame['participantFrames'].items():
-#             values = (
-#                 match_id,
-#                 pdata['participantId'],
-#                 timestamp,
-#                 pdata['position']['x'],
-#                 pdata['position']['y'],
-#                 pdata['level'],
-#                 pdata['totalGold'],
-#                 pdata['currentGold'],
-#                 pdata['xp'],
-#                 pdata['minionsKilled'],
-#                 pdata['jungleMinionsKilled'],
-#                 None  # event_type is None for participantFrames
-#             )
-#             cursor.execute(sql, values)
-#
-#         for event in frame['events']:
-#             participant_id = event.get('participantId', None)
-#             event_type = event['type']
-#
-#             if participant_id:
-#                 position = event.get('position', {'x': None, 'y': None})
-#                 values = (
-#                     match_id,
-#                     participant_id,
-#                     timestamp,
-#                     position['x'],
-#                     position['y'],
-#                     None, None, None, None, None, None,  # level, total_gold, current_gold, xp, minions_killed, jungle_minions_killed are None for events
-#                     event_type
-#                 )
-#                 cursor.execute(sql, values)
-#
-#     conn.commit()
-#     cursor.close()
+def insert_timeline_data(conn, match_id, match_timeline):
+    cursor = conn.cursor()
+    sql = '''
+        INSERT INTO timelines (match_id, participant_id, timestamp, position_x, position_y, level, total_gold, current_gold, xp, minions_killed, jungle_minions_killed, event_type, bounty, kill_streak_length, killer_id, shutdown_bounty)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (match_id, participant_id, timestamp) DO NOTHING;
+        '''
+
+    for frame in match_timeline['info']['frames']:
+        timestamp = frame['timestamp']
+
+        for pid, pdata in frame['participantFrames'].items():
+            values = (
+                match_id,
+                pdata['participantId'],
+                timestamp,
+                pdata['position']['x'],
+                pdata['position']['y'],
+                pdata['level'],
+                pdata['totalGold'],
+                pdata['currentGold'],
+                pdata['xp'],
+                pdata['minionsKilled'],
+                pdata['jungleMinionsKilled'],
+                None,  # event_type is None for participantFrames
+                None, None, None, None # bounty, kill_streak_length, killer_id, shutdown_bounty are None for
+                # participantFrames
+            )
+            cursor.execute(sql, values)
+
+        for event in frame['events']:
+            participant_id = event.get('participantId', None)
+            event_type = event['type']
+
+            if participant_id:
+                position = event.get('position', {'x': None, 'y': None})
+                values = (
+                    match_id,
+                    participant_id,
+                    timestamp,
+                    position['x'],
+                    position['y'],
+                    None, None, None, None, None, None,
+                    # level, total_gold, current_gold, xp, minions_killed, jungle_minions_killed are None for events
+                    event_type,
+                    event.get('bounty', None),
+                    event.get('killStreakLength', None),
+                    event.get('killerId', None),
+                    event.get('shutdownBounty', None)
+                )
+                cursor.execute(sql, values)
+
+    conn.commit()
+    cursor.close()
 
 for match_id in matches:
     # get
@@ -159,7 +183,7 @@ for match_id in matches:
 
     # insert data into database
     insert_match_data(conn, match_data)
-    # insert_timeline_data(conn, match_data['metadata']['matchId'], match_timeline)
+    insert_timeline_data(conn, match_data['metadata']['matchId'], match_timeline)
 
     # rate limit respect
     time.sleep(3)
